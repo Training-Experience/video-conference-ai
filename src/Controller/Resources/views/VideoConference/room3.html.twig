@@ -1,0 +1,215 @@
+{% extends '@Index/base.html.twig' %}
+
+{% set title = get_page_title(room.name|default('interviews.video_conference'|trans({}, 'interviews'))) %}
+{% block title %}{{ title }}{% endblock %}
+{% block og_title %}{{ title }}{% endblock %}
+
+{% block stylesheets %}
+    {% stylesheets filter='scssphp' output='css/video-conference.css'
+        'bundles/index/scss/views/video-conference.scss'
+    %}
+        <link href="{{ asset_url }}" rel="stylesheet" type="text/css" media="screen"/>
+    {% endstylesheets %}
+    <link href="{{ asset('css/toastr.css') }}" rel="stylesheet" type="text/css" media="screen"/>
+{% endblock %}
+{% block fb_customer_chat %}{# Disable #}{% endblock %}
+
+{% block javascripts %}
+    <script src="{{ asset('bundles/index/js/polyfills/mediastreamtrackgenerator.js') }}"></script>
+    <script src="{{ asset('bundles/index/js/polyfills/mediastreamtrackprocessor.js') }}"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation/selfie_segmentation.js" crossorigin="anonymous"></script>
+    <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+{#    <script src="https://unpkg.dev/@vladmandic/face-api/dist/face-api.js"></script>#}
+    <script src="https://cdn.jsdelivr.net/npm/@vladmandic/human/dist/human.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@ricky0123/vad-web@0.0.18/dist/bundle.min.js"></script>
+    <script src="{{ asset('js/toastr.js') }}"></script>
+    <script src="{{ asset('bundles/bazingajstranslation/js/translator.min.js') }}"></script>
+    <script src="{{ asset('js/translations/config.js') }}"></script>
+    <script src="{{ asset('js/translations/interviews/'~app.request.locale~'.js') }}"></script>
+    <script src="{{ asset('js/translations/messages/'~app.request.locale~'.js') }}"></script>
+    <script>
+        const ROOM_ID = '{{ room.id }}';
+        let uniqueToken = '{{ uniqueToken }}';
+        let userName = '{{ userName }}';
+        let connectedPeers = {{ room.connections|json_encode|raw }};
+        const TRANSCRIPTION_ENABLED = {{ is_granted('transcribe_audio', room) ? 'true' : 'false' }};
+        const EMOTION_DETECTION_ENABLED = {{ is_granted('detect_emotions_self', room) ? 'true' : 'false' }};
+
+        $(document).ready(function () {
+            if (!userName) {
+                userName = prompt("{{ 'interviews.video_conference.name_prompt'|trans({}, 'interviews') }}");
+                navigator.sendBeacon(Routing.generate('video_conference_set_room_user_name', {'room': ROOM_ID, 'userName': userName}));
+            }
+        })
+    </script>
+{% endblock %}
+
+{% block content %}
+    <div class="min-full-height">
+        <div class="container-fluid">
+            <div class="row">
+                <div class="content">
+                    <div>
+                        <div id="pre_join_container" class="conference-container">
+                            <div class="video-preview col-md-6 col-xs-12">
+                                <video id="video_preview" autoplay="autoplay" muted="muted" playsinline="playsinline"></video>
+                                <canvas id="volume_meter" class="volume-meter" width="30" height="90" style="background-color: rgba(255, 255, 255, 0.5)"></canvas>
+                            </div>
+
+                            <div class="settings">
+                                <div class="device-settings">
+                                    <label for="cameraSelect">{{ 'interviews.video_conference.select_webcam'|trans({}, 'interviews') }}:</label>
+                                    <select id="cameraSelect"></select>
+
+                                    <label for="microphoneSelect">{{ 'interviews.video_conference.select_mic'|trans({}, 'interviews') }}:</label>
+                                    <select id="microphoneSelect"></select>
+                                </div>
+
+                                <div class="controls">
+                                    <button  class="js-mute-audio-btn" onclick="muteAudio()">
+                                        <i class="fa fa-microphone-slash"></i>
+                                        {{ 'interviews.video_conference.mute_unmute_mic'|trans({}, 'interviews') }}
+                                    </button>
+                                    <button  class="js-mute-video-btn" onclick="muteVideo()">
+                                        <i class="fa fa-video-camera-slash"></i>
+                                        {{ 'interviews.video_conference.mute_unmute_camera'|trans({}, 'interviews') }}
+                                    </button>
+                                    <button  class="js-background-blur-btn" onclick="toggleBackgroundBlur()">
+                                        <i class="fa fa-user-background-blur"></i>
+                                        {{ 'interviews.video_conference.toggle_background_blur'|trans({}, 'interviews') }}
+                                    </button>
+                                </div>
+                                {% if is_granted('transcribe_audio', room) %}
+                                    {% include '@Index/templates/message.html.twig' with {'messages': ['interviews.video_conference.recording_warning'|trans({}, 'interviews')], 'type': 'info'} %}
+                                {% endif %}
+                                <div class="actions">
+                                    <button id="join_button" class="btn btn-outline-rounded btn-tx" onclick="initializeRoomCall()">
+                                        {{ 'interviews.video_conference.join_video_conference'|trans({}, 'interviews') }}
+                                        <i class="fa fa-spinner fa-spin hidden"></i>
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                        <div id="conference_container" class="conference-container hidden">
+                            <div id="video_container" class="video-container">
+                                <i id="rec_notification" class="fa fa-video-camera" style="display: none;" data-toggle="tooltip" title="{{ 'interviews.video_conference.recording_notification'|trans({}, 'interviews') }}"></i>
+                                <div id="local_view">
+                                    <div id="self_view">
+                                        <video id="self_video" autoplay playsinline muted="muted"></video>
+                                    </div>
+                                </div>
+                                <div class="toolbar-buttons">
+                                    <div class="btn-group">
+                                        <a role="button" class="btn btn-default js-mute-audio-btn" id="mute_audio" onclick="muteAudio()"
+                                           title="{{ 'interviews.video_conference.mute_unmute_mic'|trans({}, 'interviews') }}">
+                                            <i class="fa fa-microphone-slash"></i>
+                                        </a>
+                                        <a role="button" class="btn btn-default js-mute-video-btn" id="mute_video" onclick="muteVideo()"
+                                           title="{{ 'interviews.video_conference.mute_unmute_camera'|trans({}, 'interviews') }}">
+                                            <i class="fa fa-video-camera-slash"></i>
+                                        </a>
+                                        <a role="button" class="btn btn-default js-screen-share-btn" id="toggle_screen_share" onClick="screenShare()"
+                                            title="{{ 'interviews.video_conference.share_screen'|trans({}, 'interviews') }}">
+                                            <i class="fa fa-desktop"></i>
+                                        </a>
+                                        <a role="button" class="btn btn-default js-chat-btn" id="toggle_chat" onClick="toggleChat()"
+                                            title="{{ 'interviews.video_conference.toggle_chat'|trans({}, 'interviews') }}">
+                                            <i class="fa fa-commenting"></i>
+                                            <span class="chat-notification-tag" id="chat-tag" style="display: none;">&nbsp;</span>
+                                        </a>
+                                        <a role="button" class="btn btn-default" id="invite_participant" data-target="#invite_modal"
+                                           data-title="{{ 'interviews.video_conference.invite_participant'|trans({}, 'interviews') }}"
+                                           onclick="inviteParticipant()"
+                                        >
+                                            <span class="fa fa-fw fa-user-plus"></span>
+                                        </a>
+                                        <a role="button" class="btn btn-default js-background-blur-btn" id="toggle_background_blur" onclick="toggleBackgroundBlur();"
+                                           title="{{ 'interviews.video_conference.toggle_background_blur'|trans({}, 'interviews') }}">
+                                            <i class="fa fa-user-background-blur"></i>
+                                        </a>
+                                        {% if is_granted('display_emotions', room) %}
+                                        <a role="button" class="btn btn-default js-emotion-detection-btn" id="toggle_emotion_detection" onclick="toggleEmotionDetection()"
+                                           title="{{ 'interviews.video_conference.toggle_emotion_detection'|trans({}, 'interviews') }}">
+                                            <i class="fa {# look in video-conference.scss for icon rules #}"></i>
+                                        </a>
+                                        {% endif %}
+                                        <a role="button" class="btn btn-danger" id="disconnect_call"
+                                           title="{{ 'interviews.video_conference.end_call'|trans({}, 'interviews') }}">
+                                            <i class="fa fa-phone" style="transform: rotate(135deg);"></i>
+                                        </a>
+
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="chat-container" id="chat_container">
+                                <div class="chat-header">
+                                    {{ 'interviews.video_conference.chat'|trans({}, 'interviews') }}
+                                    <button type="button" class="close" onclick="toggleChat()">×</button>
+                                </div>
+                                <div class="items-list">
+                                    <div id="chat-window">
+                                        <div class="messages">
+                                            <ul class="chat-message" id="chat-message"></ul>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="chat-message-input">
+                                    <form id="chat-form">
+                                        <textarea class="form-control" name="message-text" id="chat-text-area"></textarea>
+                                        <label for="chat-file-input" class="btn btn-transparent" title="{{ 'files.add_attachments'|trans({}, 'files') }}" style="display: grid; place-items: center;border-color: var(--color-shadow)">
+                                            <i class="fa fa-paperclip"></i>
+                                        </label>
+                                        <input type="file" multiple id="chat-file-input" style="display: none">
+                                        <button type="submit" class="btn btn-transparent" title="{{ 'base.button.send_message'|trans }}" style="border-color: var(--color-shadow)">
+                                            <i class="fa fa-send"></i>
+                                        </button>
+                                    </form>
+                                    <div id="chat_selected_files">
+                                        <div class="not-only-child">
+                                            <span>{{ 'files.attachments'|trans({}, 'files') }}:</span>
+                                            <a id="chat_clear_attachments" role="button" class="text-muted underlined">{{ 'base.button.clear'|trans }}</a>
+                                        </div>
+                                    </div>
+
+                                </div>
+                                {% if is_granted('get_interviewer_questions', room) %}
+                                <div class="question-container">
+                                    <div class="question-header">
+                                        {{ 'interviews.video_conference.suggested_questions'|trans({}, 'interviews') }}
+                                        <button type="button" class="close" id="question_refresh_button" onclick="refreshInterviewerQuestions(true)">
+                                            <i class="fa fa-refresh"></i>
+                                        </button>
+                                    </div>
+                                    <div style="position: relative">
+                                        <div id="question_carousel" class="carousel slide" data-ride="carousel" data-interval="20000">
+                                            <div id="question_list" class="carousel-inner"></div>
+                                        </div>
+                                        <div class="controls pull-right">
+                                            <a data-slide="prev" href="#question_carousel" id="testimonialPrevBtn"
+                                               class="left carousel-control"
+                                            >
+                                                <i class="fa fa-chevron-left"></i>
+                                            </a>
+                                            <a data-slide="next" href="#question_carousel" id="testimonialNextBtn"
+                                               class="right carousel-control"
+                                            >
+                                                <i class="fa fa-chevron-right"></i>
+                                            </a>
+                                        </div>
+                                    </div>
+                                </div>
+                                {% endif %}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <script src="{{ asset('bundles/index/js/video-conference-peer.js') }}"></script>
+{% endblock %}
+
+{% block modals %}
+    {% include '@Index/modals/js_form_container_modal.twig' with {'id': 'invite_modal'} %}
+{% endblock %}
